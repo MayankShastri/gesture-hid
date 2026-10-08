@@ -1,15 +1,13 @@
 """
-Gesture-Controlled Input Device — Host Bridge
-Reads serial events from ESP8266 + MPU6050 IMU, maps them to app-specific macros,
-and shows a live customtkinter dashboard with live telemetry.
+Gesture Bridge — Host-side Python Application
+Connects to ESP8266 + MPU6050 over USB-Serial, classifies foreground
+application context on Windows, and executes mapped macro shortcuts.
 """
 
 import threading
 import time
-import sys
 import ctypes
 from collections import deque
-
 import serial
 import serial.tools.list_ports
 import customtkinter as ctk
@@ -24,8 +22,8 @@ except ImportError:
     psutil = None
 
 # ---------------------------------------------------------------------------
-# Direct Windows Hardware Scan Code Input via user32.keybd_event
-# (Ensures 100% reliable Alt+Tab, Volume OSD, Browser Navigation)
+# Direct Windows Hardware Scan Code Input via user32.keybd_event & mouse_event
+# (Ensures 100% reliable Alt+Tab, Volume OSD, Smooth Browser Scrolling)
 # ---------------------------------------------------------------------------
 user32 = ctypes.windll.user32
 
@@ -46,7 +44,7 @@ VK_MEDIA_NEXT_TRACK = 0xB0
 VK_MEDIA_PREV_TRACK = 0xB1
 VK_MEDIA_PLAY_PAUSE = 0xB3
 
-# Scan codes for privileged Windows DWM sequences (Alt+Tab)
+# Scan codes
 SCAN_ALT = 0x38
 SCAN_TAB = 0x0F
 SCAN_LEFT = 0x4B
@@ -56,20 +54,28 @@ SCAN_DOWN = 0x50
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
+MOUSEEVENTF_WHEEL = 0x0800
 
-def press_key(vk, scan=0):
-    user32.keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY, 0)
-    time.sleep(0.02)
-    user32.keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+def press_key(vk, scan=0, extended=False):
+    flags = KEYEVENTF_EXTENDEDKEY if extended else 0
+    user32.keybd_event(vk, scan, flags, 0)
+    time.sleep(0.015)
+    user32.keybd_event(vk, scan, flags | KEYEVENTF_KEYUP, 0)
 
-def hotkey(vk1, scan1, vk2, scan2):
-    user32.keybd_event(vk1, scan1, KEYEVENTF_EXTENDEDKEY, 0)
-    time.sleep(0.02)
-    user32.keybd_event(vk2, scan2, KEYEVENTF_EXTENDEDKEY, 0)
-    time.sleep(0.02)
-    user32.keybd_event(vk2, scan2, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+def hotkey(vk1, scan1, vk2, scan2, extended1=False, extended2=False):
+    flags1 = KEYEVENTF_EXTENDEDKEY if extended1 else 0
+    flags2 = KEYEVENTF_EXTENDEDKEY if extended2 else 0
+    user32.keybd_event(vk1, scan1, flags1, 0)
+    time.sleep(0.015)
+    user32.keybd_event(vk2, scan2, flags2, 0)
+    time.sleep(0.015)
+    user32.keybd_event(vk2, scan2, flags2 | KEYEVENTF_KEYUP, 0)
     time.sleep(0.01)
-    user32.keybd_event(vk1, scan1, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(vk1, scan1, flags1 | KEYEVENTF_KEYUP, 0)
+
+def scroll(clicks):
+    # clicks > 0 is scroll up, clicks < 0 is scroll down (gentle step)
+    user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(clicks * 50), 0)
 
 COMBO_WINDOW_S = 0.90
 BAUD = 9600
@@ -78,49 +84,49 @@ BAUD = 9600
 # App profiles with high-visibility actions
 # ---------------------------------------------------------------------------
 PROFILES = {
-    "photos": {
-        "match": ["photos", "picture", "gallery", "image", "viewer", "paint", "picasa", "photoviewer"],
-        "SWIPE_LEFT":        ("Previous Photo (←)", lambda: press_key(VK_LEFT, SCAN_LEFT)),
-        "SWIPE_RIGHT":       ("Next Photo (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT)),
-        "SWIPE_UP":          ("Zoom In (↑)", lambda: press_key(VK_UP, SCAN_UP)),
-        "SWIPE_DOWN":        ("Zoom Out (↓)", lambda: press_key(VK_DOWN, SCAN_DOWN)),
-        "TILT_HOLD_LEFT":    ("Hold Prev Photo (←)", lambda: press_key(VK_LEFT, SCAN_LEFT)),
-        "TILT_HOLD_RIGHT":   ("Hold Next Photo (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT)),
-        "TILT_HOLD_FORWARD": ("Hold Zoom In (↑)", lambda: press_key(VK_UP, SCAN_UP)),
-        "TILT_HOLD_BACKWARD":("Hold Zoom Out (↓)", lambda: press_key(VK_DOWN, SCAN_DOWN)),
-    },
     "browser": {
-        "match": ["chrome", "msedge", "firefox", "brave", "opera"],
-        "SWIPE_LEFT":        ("Browser Back", lambda: hotkey(VK_MENU, SCAN_ALT, VK_LEFT, SCAN_LEFT)),
-        "SWIPE_RIGHT":       ("Browser Forward", lambda: hotkey(VK_MENU, SCAN_ALT, VK_RIGHT, SCAN_RIGHT)),
-        "SWIPE_UP":          ("Page Down (Scroll)", lambda: press_key(VK_NEXT)),
-        "SWIPE_DOWN":        ("Page Up (Scroll)", lambda: press_key(VK_PRIOR)),
-        "TILT_HOLD_LEFT":    ("Previous Tab", lambda: hotkey(VK_CONTROL, 0x1D, VK_PRIOR, 0)),
-        "TILT_HOLD_RIGHT":   ("Next Tab", lambda: hotkey(VK_CONTROL, 0x1D, VK_NEXT, 0)),
-        "TILT_HOLD_FORWARD": ("Scroll Down", lambda: press_key(VK_NEXT)),
-        "TILT_HOLD_BACKWARD":("Scroll Up", lambda: press_key(VK_PRIOR)),
+        "match": ["chrome", "msedge", "edge", "firefox", "brave", "opera", "arc", "vivaldi", "browser"],
+        "SWIPE_LEFT":        ("Browser Back (Alt+←)", lambda: hotkey(VK_MENU, SCAN_ALT, VK_LEFT, SCAN_LEFT, extended2=True)),
+        "SWIPE_RIGHT":       ("Browser Forward (Alt+→)", lambda: hotkey(VK_MENU, SCAN_ALT, VK_RIGHT, SCAN_RIGHT, extended2=True)),
+        "SWIPE_UP":          ("Fast Scroll Down", lambda: scroll(-2)),
+        "SWIPE_DOWN":        ("Fast Scroll Up", lambda: scroll(2)),
+        "TILT_HOLD_LEFT":    ("Previous Tab (Ctrl+Shift+Tab)", lambda: hotkey(VK_CONTROL, 0x1D, VK_PRIOR, 0x49, extended2=True)),
+        "TILT_HOLD_RIGHT":   ("Next Tab (Ctrl+Tab)", lambda: hotkey(VK_CONTROL, 0x1D, VK_NEXT, 0x51, extended2=True)),
+        "TILT_HOLD_FORWARD": ("Scroll Down", lambda: scroll(-1)),
+        "TILT_HOLD_BACKWARD":("Scroll Up", lambda: scroll(1)),
     },
     "media": {
-        "match": ["spotify", "vlc", "wmplayer", "groove", "itunes", "music", "youtube"],
-        "SWIPE_LEFT":        ("Prev Track", lambda: press_key(VK_MEDIA_PREV_TRACK)),
-        "SWIPE_RIGHT":       ("Next Track", lambda: press_key(VK_MEDIA_NEXT_TRACK)),
-        "SWIPE_UP":          ("Volume Up", lambda: press_key(VK_VOLUME_UP)),
-        "SWIPE_DOWN":        ("Volume Down", lambda: press_key(VK_VOLUME_DOWN)),
-        "TILT_HOLD_LEFT":    ("Prev Track", lambda: press_key(VK_MEDIA_PREV_TRACK)),
-        "TILT_HOLD_RIGHT":   ("Next Track", lambda: press_key(VK_MEDIA_NEXT_TRACK)),
-        "TILT_HOLD_FORWARD": ("Volume Up", lambda: press_key(VK_VOLUME_UP)),
-        "TILT_HOLD_BACKWARD":("Volume Down", lambda: press_key(VK_VOLUME_DOWN)),
+        "match": ["spotify", "vlc", "wmplayer", "groove", "itunes", "music", "tidal", "media"],
+        "SWIPE_LEFT":        ("Previous Track", lambda: press_key(VK_MEDIA_PREV_TRACK, extended=True)),
+        "SWIPE_RIGHT":       ("Next Track", lambda: press_key(VK_MEDIA_NEXT_TRACK, extended=True)),
+        "SWIPE_UP":          ("Play / Pause", lambda: press_key(VK_MEDIA_PLAY_PAUSE, extended=True)),
+        "SWIPE_DOWN":        ("Mute / Unmute", lambda: press_key(VK_VOLUME_MUTE, extended=True)),
+        "TILT_HOLD_LEFT":    ("Previous Track", lambda: press_key(VK_MEDIA_PREV_TRACK, extended=True)),
+        "TILT_HOLD_RIGHT":   ("Next Track", lambda: press_key(VK_MEDIA_NEXT_TRACK, extended=True)),
+        "TILT_HOLD_FORWARD": ("Volume Up", lambda: press_key(VK_VOLUME_UP, extended=True)),
+        "TILT_HOLD_BACKWARD":("Volume Down", lambda: press_key(VK_VOLUME_DOWN, extended=True)),
+    },
+    "photos": {
+        "match": ["photos", "picture", "gallery", "image", "viewer", "paint", "photoviewer"],
+        "SWIPE_LEFT":        ("Previous Photo (←)", lambda: press_key(VK_LEFT, SCAN_LEFT, extended=True)),
+        "SWIPE_RIGHT":       ("Next Photo (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT, extended=True)),
+        "SWIPE_UP":          ("Zoom In (↑)", lambda: press_key(VK_UP, SCAN_UP, extended=True)),
+        "SWIPE_DOWN":        ("Zoom Out (↓)", lambda: press_key(VK_DOWN, SCAN_DOWN, extended=True)),
+        "TILT_HOLD_LEFT":    ("Hold Prev Photo (←)", lambda: press_key(VK_LEFT, SCAN_LEFT, extended=True)),
+        "TILT_HOLD_RIGHT":   ("Hold Next Photo (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT, extended=True)),
+        "TILT_HOLD_FORWARD": ("Hold Zoom In (↑)", lambda: press_key(VK_UP, SCAN_UP, extended=True)),
+        "TILT_HOLD_BACKWARD":("Hold Zoom Out (↓)", lambda: press_key(VK_DOWN, SCAN_DOWN, extended=True)),
     },
     "default": {
         "match": [],
-        "SWIPE_LEFT":        ("Arrow Left (←)", lambda: press_key(VK_LEFT, SCAN_LEFT)),
-        "SWIPE_RIGHT":       ("Arrow Right (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT)),
-        "SWIPE_UP":          ("Volume Up", lambda: press_key(VK_VOLUME_UP)),
-        "SWIPE_DOWN":        ("Volume Down", lambda: press_key(VK_VOLUME_DOWN)),
-        "TILT_HOLD_LEFT":    ("Hold Left (←)", lambda: press_key(VK_LEFT, SCAN_LEFT)),
-        "TILT_HOLD_RIGHT":   ("Hold Right (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT)),
-        "TILT_HOLD_FORWARD": ("Hold Volume Up", lambda: press_key(VK_VOLUME_UP)),
-        "TILT_HOLD_BACKWARD":("Hold Volume Down", lambda: press_key(VK_VOLUME_DOWN)),
+        "SWIPE_LEFT":        ("Arrow Left (←)", lambda: press_key(VK_LEFT, SCAN_LEFT, extended=True)),
+        "SWIPE_RIGHT":       ("Arrow Right (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT, extended=True)),
+        "SWIPE_UP":          ("Page Up (Scroll)", lambda: scroll(2)),
+        "SWIPE_DOWN":        ("Page Down (Scroll)", lambda: scroll(-2)),
+        "TILT_HOLD_LEFT":    ("Hold Left (←)", lambda: press_key(VK_LEFT, SCAN_LEFT, extended=True)),
+        "TILT_HOLD_RIGHT":   ("Hold Right (→)", lambda: press_key(VK_RIGHT, SCAN_RIGHT, extended=True)),
+        "TILT_HOLD_FORWARD": ("Scroll Down", lambda: scroll(-1)),
+        "TILT_HOLD_BACKWARD":("Scroll Up", lambda: scroll(1)),
     },
 }
 
@@ -130,10 +136,12 @@ def get_foreground_app():
         return "unknown"
     try:
         hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return "unknown"
         title = win32gui.GetWindowText(hwnd) or ""
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         name = ""
-        if psutil is not None:
+        if psutil is not None and pid > 0:
             try:
                 name = psutil.Process(pid).name().lower()
             except Exception:
@@ -175,11 +183,16 @@ class GestureBridge:
         self.last_flick_label = None
         self.combo_active = False
         self.alt_held = False
+        self.last_tilt_event_time = 0.0
         self.log = deque(maxlen=80)
 
     def connect(self, port):
         self.ser = serial.Serial(port, BAUD, timeout=0.2)
         time.sleep(0.3)
+
+    def send_command(self, cmd):
+        if self.ser and self.ser.is_open:
+            self.ser.write(f"{cmd.strip()}\n".encode("utf-8"))
 
     def close(self):
         self.running = False
@@ -191,6 +204,23 @@ class GestureBridge:
         self.running = True
         t = threading.Thread(target=self._read_loop, daemon=True)
         t.start()
+        w = threading.Thread(target=self._watchdog_loop, daemon=True)
+        w.start()
+
+    def _watchdog_loop(self):
+        while self.running:
+            time.sleep(0.05)
+            if self.alt_held or self.combo_active:
+                # If no tilt packet received within 400ms, release Alt
+                if (time.time() - self.last_tilt_event_time) > 0.45:
+                    self._release_alt()
+                    app = get_foreground_app()
+                    self.on_event("combo", {
+                        "gesture": "COMBO_RELEASE (TIMEOUT)",
+                        "profile": resolve_profile(app),
+                        "app": app,
+                        "macro": "Alt Released -> Switched Window!",
+                    })
 
     def _read_loop(self):
         while self.running and self.ser and self.ser.is_open:
@@ -203,9 +233,9 @@ class GestureBridge:
                 self._handle(line)
 
     def _release_alt(self):
-        if self.alt_held:
+        if self.alt_held or self.combo_active:
             try:
-                user32.keybd_event(VK_MENU, SCAN_ALT, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(VK_MENU, SCAN_ALT, KEYEVENTF_KEYUP, 0)
             except Exception:
                 pass
             self.alt_held = False
@@ -213,20 +243,22 @@ class GestureBridge:
 
     def _start_combo(self):
         self.combo_active = True
+        self.last_tilt_event_time = time.time()
         if not self.alt_held:
             # Hold down Alt with physical scan code
             user32.keybd_event(VK_MENU, SCAN_ALT, 0, 0)
             self.alt_held = True
-            time.sleep(0.04)
+            time.sleep(0.03)
         # Pulse Tab
         user32.keybd_event(VK_TAB, SCAN_TAB, 0, 0)
-        time.sleep(0.03)
+        time.sleep(0.02)
         user32.keybd_event(VK_TAB, SCAN_TAB, KEYEVENTF_KEYUP, 0)
 
     def _cycle_combo(self):
+        self.last_tilt_event_time = time.time()
         # Pulse Tab again while Alt is held
         user32.keybd_event(VK_TAB, SCAN_TAB, 0, 0)
-        time.sleep(0.03)
+        time.sleep(0.02)
         user32.keybd_event(VK_TAB, SCAN_TAB, KEYEVENTF_KEYUP, 0)
 
     def _handle(self, line):
@@ -246,6 +278,7 @@ class GestureBridge:
             return
 
         if line.startswith("TILT_HOLD_"):
+            self.last_tilt_event_time = now
             # Check if flick happened recently -> trigger Alt+Tab Combo
             if (not self.combo_active
                     and self.last_flick_label
@@ -274,7 +307,7 @@ class GestureBridge:
 
         if line == "TILT_RELEASE":
             self.last_flick_label = None
-            if self.combo_active:
+            if self.combo_active or self.alt_held:
                 self._release_alt()
                 self.on_event("combo", {
                     "gesture": "COMBO_RELEASE",
@@ -319,7 +352,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Gesture Input Device — ESP8266 + MPU6050")
-        self.geometry("820x620")
+        self.geometry("860x640")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -329,7 +362,7 @@ class App(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
 
-        header = ctk.CTkLabel(self, text="Gesture-Controlled Input Device",
+        header = ctk.CTkLabel(self, text="Gesture-Controlled Human Interface Device",
                               font=ctk.CTkFont(size=22, weight="bold"))
         header.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="w")
 
@@ -338,14 +371,19 @@ class App(ctk.CTk):
         top_frame.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
 
         ctk.CTkLabel(top_frame, text="Port:").pack(side="left", padx=(10, 4), pady=8)
-        self.entry_port = ctk.CTkEntry(top_frame, width=120)
+        self.entry_port = ctk.CTkEntry(top_frame, width=110)
         default_port = find_serial_port() or "COM7"
         self.entry_port.insert(0, default_port)
         self.entry_port.pack(side="left", padx=4, pady=8)
 
-        self.btn_connect = ctk.CTkButton(top_frame, text="Connect", width=90,
+        self.btn_connect = ctk.CTkButton(top_frame, text="Connect", width=85,
                                          command=self._toggle_connect)
-        self.btn_connect.pack(side="left", padx=8, pady=8)
+        self.btn_connect.pack(side="left", padx=6, pady=8)
+
+        self.btn_calibrate = ctk.CTkButton(top_frame, text="Calibrate / Center", width=120,
+                                           fg_color="#d35400", hover_color="#e67e22",
+                                           command=self._on_calibrate)
+        self.btn_calibrate.pack(side="left", padx=6, pady=8)
 
         self.lbl_status = ctk.CTkLabel(top_frame, text="Status: Disconnected",
                                        text_color="gray")
@@ -367,7 +405,7 @@ class App(ctk.CTk):
         # Quick guide banner
         guide = ctk.CTkFrame(self, fg_color=("#2b2b2b", "#1e1e1e"))
         guide.grid(row=3, column=0, padx=20, pady=4, sticky="ew")
-        ctk.CTkLabel(guide, text="⚡ Gestures: Flick (L/R/U/D) = Quick Action  |  Tilt & Hold = Repeat Action  |  🔥 Flick + Tilt-Hold = Alt+Tab Switcher",
+        ctk.CTkLabel(guide, text="⚡ Tilt & Hold = Continuous Action (Scroll/Volume)  |  Flick = Quick Action  |  🔥 Flick + Tilt-Hold = Alt+Tab Switcher",
                      font=ctk.CTkFont(size=11, weight="bold"), text_color="#3498db").pack(padx=10, pady=6)
 
         # Event log
@@ -402,6 +440,13 @@ class App(ctk.CTk):
         self.lbl_app.configure(text=short_app or "—")
         self.lbl_profile.configure(text=profile.upper())
         self.after(400, self._refresh_app)
+
+    def _on_calibrate(self):
+        if self.connected:
+            self.bridge.send_command("CAL")
+            self._append_log("[SYS] Sent sensor zero-calibration command (hold device level/neutral)...")
+        else:
+            self._append_log("[SYS] Connect to device before calibrating.")
 
     def _toggle_connect(self):
         if not self.connected:
