@@ -1,0 +1,36 @@
+# Confidential / Pre-Publication Documents (Patent & Research Paper)
+Patent/
+Research_Paper/
+Project_Docs/
+
+# Environment & Secrets
+.env
+*.env.local
+*.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Office & OS Temporary Files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+.DS_Store
+Thumbs.db
+
+# IDE & Tool Metadata
+.vscode/
+.idea/
+.claude/
+graft/
+jev-humanizer/
